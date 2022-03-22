@@ -10,10 +10,11 @@ import (
 	"encoding/pem"
 	"log"
 	"math/big"
+	mathrand "math/rand"
 	"time"
 )
 
-func GenerateCACertificate() (caCert *x509.Certificate, caBytes []byte, caKey *rsa.PrivateKey) {
+func GenerateCACertificate() (caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	// set up our CA certificate
 	ca := &x509.Certificate{
 		SerialNumber: big.NewInt(2019),
@@ -44,15 +45,15 @@ func GenerateCACertificate() (caCert *x509.Certificate, caBytes []byte, caKey *r
 	if err != nil {
 		log.Fatalf("Failed to generate CA certificate %s\n", err.Error())
 	}
-
-	return ca, caFinal, caPrivKey
+	cert, err := x509.ParseCertificate(caFinal)
+	return cert, caPrivKey
 }
 
 func SignCertificate(ca *x509.Certificate, caPrivKey *rsa.PrivateKey, certPrivKey *rsa.PrivateKey, commonName string) (serverTLSConf tls.Certificate) {
 
 	// set up our server certificate
 	cert := &x509.Certificate{
-		SerialNumber: big.NewInt(2019),
+		SerialNumber: big.NewInt(int64(mathrand.Uint64())),
 		Subject: pkix.Name{
 			CommonName: commonName,
 		},

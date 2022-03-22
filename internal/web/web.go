@@ -5,46 +5,77 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"software.sslmate.com/src/go-pkcs12"
 )
 
-func StartHttpServer(port int) {
+func StartWebServers(httpPort, httpsPort int, callback func(protocol string, uri string)) {
+	startHttpServer(httpPort, callback)
+	startHttpsServer(httpsPort)
+}
 
-	log.Printf("Starting HTTP server at port %d\n", port)
+func startHttpServer(httpPort int, callback func(protocol string, uri string)) {
+	log.Printf("Starting HTTP server at port %d\n", httpPort)
 
-	http.HandleFunc("/", handleRequest())
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "@_@\n")
+		protocol := "HTTP"
+		if r.TLS != nil {
+			protocol = "HTTPS"
+		}
+		callback(protocol, fmt.Sprintf("%s %s%s", r.Method, r.Host, r.RequestURI))
+	})
 
 	go func() {
-		if err := http.ListenAndServe(fmt.Sprint(":", port), nil); err != nil {
+		if err := http.ListenAndServe(fmt.Sprint(":", httpPort), nil); err != nil {
 			log.Fatalf("Failed to start http server %s\n", err.Error())
 		}
 	}()
 }
 
-func handleRequest() func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, "@_@\n")
-		log.Printf("Responded to request %s %s%s", r.Method, r.Host, r.RequestURI)
-	}
-}
-
-func StartHttpsServer(port int) {
+func startHttpsServer(port int) {
 	log.Printf("Starting HTTPs server at port %d\n", port)
-	caCertificate, caBytes, caKey := GenerateCACertificate()
 
-	caCert, _ := x509.ParseCertificate(caBytes)
-	publicKeyDer, _ := x509.MarshalPKIXPublicKey(caCert.PublicKey)
-	publicKeyBlock := pem.Block{
-		Type:  "PUBLIC KEY",
-		Bytes: publicKeyDer,
+	ex, err := os.Executable()
+	if err != nil {
+		panic(err)
 	}
-	publicKeyPem := string(pem.EncodeToMemory(&publicKeyBlock))
-	log.Printf("CA Certificate (DER format):\n%s", publicKeyPem)
+	exPath := filepath.Dir(ex)
+	var p12Path = filepath.Join(exPath, "ca.p12")
+	var certPath = filepath.Join(exPath, "ca.crt")
+
+	var caCertificate *x509.Certificate
+	var caKey *rsa.PrivateKey
+
+	file, err := os.Open(p12Path)
+	if errors.Is(err, os.ErrNotExist) {
+		caCertificate, caKey = GenerateCACertificate()
+		pfxBytes, err := pkcs12.Encode(rand.Reader, caKey, caCertificate, []*x509.Certificate{}, pkcs12.DefaultPassword)
+		if err != nil {
+			log.Fatal(err)
+		}
+		writeFile(p12Path, pfxBytes)
+		writeFile(certPath, caCertificate.Raw)
+	} else {
+		pfxBytes, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+		caKey2, caCertificate2, err := pkcs12.Decode(pfxBytes, pkcs12.DefaultPassword)
+		if err != nil {
+			log.Fatal(err)
+		}
+		caCertificate = caCertificate2
+		caKey = caKey2.(*rsa.PrivateKey)
+	}
 
 	// lets generate a key here and reuse it everytime!
 	certPrivKey, err := rsa.GenerateKey(rand.Reader, 4096)
@@ -70,4 +101,21 @@ func StartHttpsServer(port int) {
 			log.Fatalf("Failed to start HTTPS server %s\n", err.Error())
 		}
 	}()
+}
+
+func writeFile(path string, content []byte) {
+	file, err := os.OpenFile(
+		path,
+		os.O_WRONLY|os.O_TRUNC|os.O_CREATE,
+		0666,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	bytesWritten, err := file.Write(content)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Wrote %d bytes to %s.\n", bytesWritten, path)
 }
