@@ -7,8 +7,26 @@ import (
 	"strconv"
 )
 
-func StartDNSServer(port int, callback func(domain string)) {
-	log.Printf("Starting DNS server at port %d\n", port)
+type Server struct {
+	Port      int
+	tcpServer *dns.Server
+	udpServer *dns.Server
+}
+
+func (d *Server) Stop() {
+	log.Printf("Stopping DNS servers\n")
+	if d.tcpServer != nil {
+		log.Printf("Stopping TCP DNS server\n")
+		d.tcpServer.Shutdown()
+	}
+	if d.udpServer != nil {
+		log.Printf("Stopping UDP DNS server\n")
+		d.udpServer.Shutdown()
+	}
+}
+
+func (d *Server) Start(callback func(domain string)) {
+	log.Printf("Starting DNS server at port %d\n", d.Port)
 
 	// attach request handler func
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
@@ -33,18 +51,19 @@ func StartDNSServer(port int, callback func(domain string)) {
 	})
 
 	go func() {
-		srv := &dns.Server{Addr: "127.0.0.1:" + strconv.Itoa(port), Net: "udp"}
-		if err := srv.ListenAndServe(); err != nil {
+		d.tcpServer = &dns.Server{Addr: "127.0.0.1:" + strconv.Itoa(d.Port), Net: "udp"}
+
+		if err := d.tcpServer.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to set udp listener %s\n", err.Error())
 		}
-		defer srv.Shutdown()
+		defer d.tcpServer.Shutdown()
 	}()
 
 	go func() {
-		srv := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "tcp"}
-		if err := srv.ListenAndServe(); err != nil {
+		d.udpServer = &dns.Server{Addr: ":" + strconv.Itoa(d.Port), Net: "tcp"}
+		if err := d.udpServer.ListenAndServe(); err != nil {
 			log.Fatalf("Failed to set tcp listener %s\n", err.Error())
 		}
-		defer srv.Shutdown()
+		defer d.udpServer.Shutdown()
 	}()
 }

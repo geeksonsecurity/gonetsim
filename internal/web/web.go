@@ -1,12 +1,15 @@
 package web
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"gonetsim/internal/utils"
 	"io"
 	"io/ioutil"
 	"log"
@@ -14,35 +17,85 @@ import (
 	"os"
 	"path/filepath"
 	"software.sslmate.com/src/go-pkcs12"
+	"time"
 )
 
-func StartWebServers(httpPort, httpsPort int, callback func(protocol string, uri string)) {
-	startHttpServer(httpPort, callback)
-	startHttpsServer(httpsPort)
+type Server struct {
+	HttpPort    int
+	HttpsPort   int
+	httpServer  *http.Server
+	httpsServer *http.Server
 }
 
-func startHttpServer(httpPort int, callback func(protocol string, uri string)) {
-	log.Printf("Starting HTTP server at port %d\n", httpPort)
+func (s *Server) Start(callback func(uri string, raw string)) {
+	http.DefaultServeMux = new(http.ServeMux)
+	s.startHttpServer(callback)
+	s.startHttpsServer()
+}
+
+func (s *Server) Stop() {
+	log.Printf("Stopping web servers\n")
+	ctxShutDown, _ := context.WithTimeout(context.Background(), 2*time.Second)
+	if s.httpServer != nil {
+		log.Printf("Stopping HTTP server\n")
+		s.httpServer.Shutdown(ctxShutDown)
+	}
+	if s.httpsServer != nil {
+		log.Printf("Stopping HTTPs server\n")
+		s.httpsServer.Shutdown(ctxShutDown)
+	}
+}
+
+func (s *Server) startHttpServer(callback func(uri string, raw string)) {
+	log.Printf("Starting HTTP server at port %d\n", s.HttpPort)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, "@_@\n")
-		protocol := "HTTP"
-		if r.TLS != nil {
-			protocol = "HTTPS"
+
+		schema := r.URL.Scheme
+		requestURL := r.URL.String()
+		if schema == "" {
+			schema = "http"
+			if r.TLS != nil {
+				schema = "https"
+			}
+			requestURL = schema + "://" + r.Host + r.URL.Path
 		}
-		callback(protocol, fmt.Sprintf("%s %s%s", r.Method, r.Host, r.RequestURI))
+		requestURL = r.Method + " " + requestURL + " " + r.Proto
+
+		raw := requestURL + "\r\n"
+		headers := ""
+		// Loop over header names
+		for name, values := range r.Header {
+			// Loop over all values for the name.
+			for _, value := range values {
+				headers += fmt.Sprintf("%s: %s\r\n", name, value)
+			}
+		}
+		raw += headers
+		bodyB, _ := ioutil.ReadAll(r.Body)
+		bodyStr := string(bytes.Replace(bodyB, []byte("\r"), []byte("\r\n"), -1))
+		if bodyStr != "" {
+			raw += "\r\n\r\n" + bodyStr
+		}
+
+		callback(requestURL, raw)
 	})
 
+	s.httpServer = &http.Server{
+		Addr: fmt.Sprint(":", s.HttpPort),
+	}
+
 	go func() {
-		if err := http.ListenAndServe(fmt.Sprint(":", httpPort), nil); err != nil {
+		if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf("Failed to start http server %s\n", err.Error())
 		}
 	}()
 }
 
-func startHttpsServer(port int) {
-	log.Printf("Starting HTTPs server at port %d\n", port)
+func (s *Server) startHttpsServer() {
+	log.Printf("Starting HTTPs server at port %d\n", s.HttpsPort)
 
 	ex, err := os.Executable()
 	if err != nil {
@@ -62,8 +115,8 @@ func startHttpsServer(port int) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		writeFile(p12Path, pfxBytes)
-		writeFile(certPath, caCertificate.Raw)
+		utils.WriteBinaryFile(p12Path, pfxBytes)
+		utils.WriteBinaryFile(certPath, caCertificate.Raw)
 	} else {
 		pfxBytes, err := ioutil.ReadAll(file)
 		if err != nil {
@@ -90,32 +143,15 @@ func startHttpsServer(port int) {
 		},
 	}
 
-	s := &http.Server{
-		Addr:      fmt.Sprint(":", port),
+	s.httpsServer = &http.Server{
+		Addr:      fmt.Sprint(":", s.HttpsPort),
 		TLSConfig: serverTLSConf,
 	}
 
 	go func() {
-		defer s.Close()
-		if err := s.ListenAndServeTLS("", ""); err != nil {
+		defer s.httpsServer.Close()
+		if err := s.httpsServer.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
 			log.Fatalf("Failed to start HTTPS server %s\n", err.Error())
 		}
 	}()
-}
-
-func writeFile(path string, content []byte) {
-	file, err := os.OpenFile(
-		path,
-		os.O_WRONLY|os.O_TRUNC|os.O_CREATE,
-		0666,
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-	bytesWritten, err := file.Write(content)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Wrote %d bytes to %s.\n", bytesWritten, path)
 }
