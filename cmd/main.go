@@ -5,7 +5,9 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"gonetsim/internal/dns"
 	"gonetsim/internal/web"
@@ -20,9 +22,10 @@ type DnsRequest struct {
 }
 
 type HttpRequest struct {
-	URI      string
-	Received time.Time
-	Raw      string
+	URI         string
+	Received    time.Time
+	Content     string
+	CurlCommand string
 }
 
 type AppState struct {
@@ -39,14 +42,13 @@ func (state *AppState) AddDnsRequest(domain string) {
 	state.dnsList.Refresh()
 }
 
-func (state *AppState) AddHttpRequest(uri string, raw string) {
-	newItem := HttpRequest{URI: uri, Raw: raw, Received: time.Now()}
+func (state *AppState) AddHttpRequest(uri string, content string, curlCommand string) {
+	newItem := HttpRequest{URI: uri, Content: content, Received: time.Now(), CurlCommand: curlCommand}
 	state.httpRequests = append([]HttpRequest{newItem}, state.httpRequests...)
 	state.httpList.Refresh()
 }
 
-func generateDnsRequestLayout(state *AppState) *fyne.Container {
-	title := widget.NewLabel("DNS Requests")
+func generateDnsRequestLayout(state *AppState) *widget.Card {
 
 	list := widget.NewList(
 		func() int {
@@ -62,12 +64,10 @@ func generateDnsRequestLayout(state *AppState) *fyne.Container {
 		})
 
 	state.dnsList = list
-	return container.NewBorder(title, nil, nil, nil, list)
+	return widget.NewCard("DNS Requests", "Received DNS queries", list)
 }
 
-func generateHttpRequestLayout(state *AppState, window fyne.Window) *fyne.Container {
-	title := widget.NewLabel("HTTP(s) Requests")
-
+func generateHttpRequestLayout(state *AppState, window fyne.Window) *widget.Card {
 	list := widget.NewList(
 		func() int {
 			return len(state.httpRequests)
@@ -84,9 +84,12 @@ func generateHttpRequestLayout(state *AppState, window fyne.Window) *fyne.Contai
 		var modal *widget.PopUp
 		modal = widget.NewModalPopUp(
 			container.NewVBox(
-				widget.NewLabel(state.httpRequests[id].Raw),
+				widget.NewLabel(state.httpRequests[id].Content),
+				widget.NewButton("Copy as curl cmd", func() {
+					window.Clipboard().SetContent(state.httpRequests[id].CurlCommand)
+				}),
 				widget.NewButton("Copy", func() {
-					window.Clipboard().SetContent(state.httpRequests[id].Raw)
+					window.Clipboard().SetContent(state.httpRequests[id].Content)
 				}),
 				widget.NewButton("Close", func() {
 					modal.Hide()
@@ -98,7 +101,7 @@ func generateHttpRequestLayout(state *AppState, window fyne.Window) *fyne.Contai
 		modal.Show()
 	}
 	state.httpList = list
-	return container.NewBorder(title, nil, nil, nil, list)
+	return widget.NewCard("HTTP(s) Requests", "Received HTTP request", list)
 }
 
 func main() {
@@ -118,9 +121,9 @@ func main() {
 	myApp := app.New()
 	myWindow := myApp.NewWindow("Network Simulator")
 
-	httpResponse := widget.NewMultiLineEntry()
-	httpResponse.SetPlaceHolder("Put your response body here")
-	httpResponse.SetText("@_@")
+	httpResponseBodyEntry := widget.NewMultiLineEntry()
+	httpResponseBodyEntry.SetPlaceHolder("Put your response body here")
+	httpResponseBodyEntry.SetText("@_@")
 
 	statusCodeSelect := widget.NewSelect([]string{"200", "400", "404", "500"}, func(value string) {
 		log.Println("Status code set to", value)
@@ -143,59 +146,96 @@ func main() {
 	httpsPortEntry.Wrapping = fyne.TextWrapOff
 	httpsPortEntry.SetText("8443")
 
-	content := container.New(
-		layout.NewGridLayoutWithRows(2),
+	var startButton *widget.Button
+	var stopButton *widget.Button
+
+	startButton = widget.NewButton("Start", func() {
+		dnsPort, err := strconv.Atoi(dnsPortEntry.Text)
+		if err == nil {
+			dnsServer.Port = dnsPort
+		}
+		httpPort, err := strconv.Atoi(httpPortEntry.Text)
+		if err == nil {
+			webServer.HttpPort = httpPort
+		}
+		httpsPort, err := strconv.Atoi(httpsPortEntry.Text)
+		if err == nil {
+			webServer.HttpsPort = httpsPort
+		}
+		dnsServer.Start(appState.AddDnsRequest)
+		webServer.Start(appState.AddHttpRequest, func() (statusCode string, contentType string, body string) {
+			return statusCodeSelect.Selected, contentTypeEntry.Text, httpResponseBodyEntry.Text
+		})
+		stopButton.Enable()
+		startButton.Disable()
+	})
+
+	stopButton = widget.NewButton("Stop", func() {
+		dnsServer.Stop()
+		webServer.Stop()
+		stopButton.Disable()
+		startButton.Enable()
+	})
+	stopButton.Disable()
+
+	toolbar := widget.NewToolbar(
+		widget.NewToolbarSpacer(),
+		widget.NewToolbarAction(
+			theme.HelpIcon(), func() {
+			},
+		),
+	)
+
+	mainContent := container.New(
+		layout.NewVBoxLayout(),
 		container.New(
 			layout.NewGridLayout(2),
 			container.New(
 				layout.NewVBoxLayout(),
-				widget.NewLabel("Setup"),
-				container.New(
-					layout.NewFormLayout(),
-					widget.NewLabel("DNS Server"),
-					dnsPortEntry,
-					widget.NewLabel("HTTP Server"),
-					httpPortEntry,
-					widget.NewLabel("HTTPs Server"),
-					httpsPortEntry,
+				widget.NewCard("Setup", "Specify listening ports",
+					container.New(
+						layout.NewFormLayout(),
+						widget.NewLabel("DNS Server"),
+						dnsPortEntry,
+						widget.NewLabel("HTTP Server"),
+						httpPortEntry,
+						widget.NewLabel("HTTPs Server"),
+						httpsPortEntry,
+					),
 				),
 				container.New(
 					layout.NewHBoxLayout(),
-					widget.NewButton("Start", func() {
-						dnsPort, err := strconv.Atoi(dnsPortEntry.Text)
-						if err == nil {
-							dnsServer.Port = dnsPort
-						}
-						httpPort, err := strconv.Atoi(httpPortEntry.Text)
-						if err == nil {
-							webServer.HttpPort = httpPort
-						}
-						httpsPort, err := strconv.Atoi(httpsPortEntry.Text)
-						if err == nil {
-							webServer.HttpsPort = httpsPort
-						}
-						dnsServer.Start(appState.AddDnsRequest)
-						webServer.Start(appState.AddHttpRequest)
-					}),
-					widget.NewButton("Stop", func() {
-						dnsServer.Stop()
-						webServer.Stop()
-					}),
+					startButton,
+					stopButton,
 					layout.NewSpacer(),
+					widget.NewButton("Save CA certificate", func() {
+						data, err := webServer.GetCaCertPemFormat()
+						if err != nil {
+							fyne.NewNotification("Error", "CA certificate not yet generated, start server first!")
+						} else {
+							fileDialog := dialog.NewFileSave(
+								func(uc fyne.URIWriteCloser, _ error) {
+									uc.Write(data)
+								}, myWindow) // w is parent window
+							fileDialog.SetFileName("ca.crt")
+							fileDialog.Show()
+						}
+					}),
 				),
 			),
-			container.New(
-				layout.NewVBoxLayout(),
-				widget.NewLabel("Default Response"),
+			widget.NewCard("HTTP Response", "Configure the default HTTP response",
 				container.New(
-					layout.NewFormLayout(),
-					widget.NewLabel("Status Code"),
-					statusCodeSelect,
-					widget.NewLabel("Content-Type"),
-					contentTypeEntry,
+					layout.NewVBoxLayout(),
+					container.New(
+						layout.NewFormLayout(),
+						widget.NewLabel("Status Code"),
+						statusCodeSelect,
+						widget.NewLabel("Content-Type"),
+						contentTypeEntry,
+					),
+					widget.NewLabel("Body"),
+					httpResponseBodyEntry,
 				),
-				widget.NewLabel("Body"),
-				httpResponse,
 			),
 		),
 		container.New(
@@ -204,8 +244,9 @@ func main() {
 			generateHttpRequestLayout(&appState, myWindow),
 		))
 
+	content := container.NewBorder(
+		toolbar, nil, nil, nil, mainContent,
+	)
 	myWindow.SetContent(content)
-	//myWindow.Resize(fyne.NewSize(1024, 500))
-
 	myWindow.ShowAndRun()
 }
